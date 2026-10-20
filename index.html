@@ -1,0 +1,259 @@
+
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>市民大道路況</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 32px 18px;
+      background: #111827;
+      color: white;
+      font-family: Arial, "Microsoft JhengHei", sans-serif;
+    }
+    main { max-width: 480px; margin: auto; }
+    h1 { text-align: center; font-size: 28px; }
+    .route { text-align: center; color: #cbd5e1; }
+    button {
+      display: block;
+      width: 100%;
+      margin-top: 24px;
+      padding: 15px;
+      border: 0;
+      border-radius: 10px;
+      background: #2563eb;
+      color: white;
+      font-size: 17px;
+    }
+    button:disabled { opacity: 0.6; }
+    #status {
+      margin-top: 24px;
+      text-align: center;
+      font-size: 22px;
+      font-weight: bold;
+    }
+    #detail { margin-top: 12px; color: #cbd5e1; }
+    #roads { margin-top: 20px; line-height: 1.8; }
+    .road {
+      padding: 10px 0;
+      border-bottom: 1px solid #374151;
+    }
+    .muted { color: #9ca3af; font-size: 13px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>市民大道路況</h1>
+  <p class="route">台北車站 → 松山</p>
+  <button id="check">查詢最新路況資料</button>
+  <div id="status">尚未查詢</div>
+  <div id="detail">目前先測試資料讀取，不會猜測路況。</div>
+  <div id="roads"></div>
+</main>
+
+<script>
+const DATA_URL =
+  "https://tcgbusfs.blob.core.windows.net/blobtisv/GetVD.xml.gz";
+
+const button = document.getElementById("check");
+const statusBox = document.getElementById("status");
+const detailBox = document.getElementById("detail");
+const roadsBox = document.getElementById("roads");
+
+function field(node, name) {
+  for (const child of node.children) {
+    if (child.localName === name) return child.textContent.trim();
+  }
+  return "";
+}
+
+async function getXmlText(response) {
+  const buffer = await response.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  // gzip 檔案的開頭通常是 1F 8B。
+  const isGzip = bytes.length >= 2 &&
+                 bytes[0] === 0x1f &&
+                 bytes[1] === 0x8b;
+
+  if (!isGzip) {
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+
+  if (!("DecompressionStream" in window)) {
+    throw new Error("這個瀏覽器不支援 gzip 解壓縮");
+  }
+
+  const stream = new Blob([buffer]).stream()
+    .pipeThrough(new DecompressionStream("gzip"));
+
+  return await new Response(stream).text();
+}
+
+button.addEventListener("click", async () => {
+  button.disabled = true;
+  statusBox.textContent = "正在讀取資料……";
+  detailBox.textContent = "";
+  roadsBox.replaceChildren();
+
+  try {
+    const response = await fetch(DATA_URL, { cache: "no-store" });
+
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status);
+    }
+
+    const xmlText = await getXmlText(response);
+    const xml = new DOMParser().parseFromString(
+      xmlText, "application/xml"
+    );
+
+    if (xml.getElementsByTagName("parsererror").length > 0) {
+      throw new Error("收到的內容不是有效 XML");
+    }
+
+    const root = xml.documentElement;
+    if (root.localName !== "ExchangeData") {
+      throw new Error("資料格式與預期不同");
+    }
+
+    const exchangeTime =
+      xml.getElementsByTagNameNS("*", "ExchangeTime")[0]
+        ?.textContent.trim();
+
+    if (!exchangeTime) {
+      throw new Error("資料缺少更新時間");
+    }
+
+    const match = exchangeTime.match(
+  /^(\d{4})\/(\d{2})\/(\d{2})T(\d{2}):(\d{2}):(\d{2})$/
+);
+
+if (!match) {
+  throw new Error("無法辨識官方資料時間格式");
+}
+
+const [, year, month, day, hour, minute, second] = match;
+
+const dataTime = new Date(
+  Number(year),
+  Number(month) - 1,
+  Number(day),
+  Number(hour),
+  Number(minute),
+  Number(second)
+);
+
+const ageMinutes = (Date.now() - dataTime.getTime()) / 60000;
+
+    if (!Number.isFinite(ageMinutes) ||
+        ageMinutes < -5 ||
+        ageMinutes > 10) {
+      statusBox.textContent = "無法判斷";
+      detailBox.textContent =
+        "資料時間異常或已超過 10 分鐘，請稍後重試。資料時間：" +
+        exchangeTime;
+      return;
+    }
+
+    const sections = [
+      ...xml.getElementsByTagNameNS("*", "SectionData")
+    ];
+
+  const roads = sections.map(node => ({
+  id: field(node, "SectionId"),
+  name: field(node, "SectionName"),
+  speed: Number(field(node, "AvgSpd")),
+  startX: field(node, "StartWgsX"),
+  startY: field(node, "StartWgsY"),
+  endX: field(node, "EndWgsX"),
+  endY: field(node, "EndWgsY")
+})).filter(road =>
+  road.name.startsWith("市民大道") &&
+  Number.isFinite(road.speed) &&
+  road.speed >= 0
+);
+const eastboundCandidates = new Set([
+  "ZLXFX20", // 環河北路－重慶北路
+  "ZKVHI20", // 重慶北路－中山北路
+  "ZKNIV20", // 中山北路－金山北路
+  "ZKJJP20", // 金山北路－建國北路
+  "ZK8LT20", // 建國北路－復興北路
+  "ZJGPQ20", // 復興北路－敦化北路
+  "ZK6P820"  // 敦化北路－光復北路
+]);
+
+
+
+const eastboundRoads = roads.filter(road =>
+  eastboundCandidates.has(road.id)
+);
+
+const roadOrder = [
+  "ZLXFX20",
+  "ZKVHI20",
+  "ZKNIV20",
+  "ZKJJP20",
+  "ZK8LT20",
+  "ZJGPQ20",
+  "ZK6P820"
+];
+
+eastboundRoads.sort(
+  (a, b) => roadOrder.indexOf(a.id) - roadOrder.indexOf(b.id)
+);
+
+    if (roads.length === 0) {
+      throw new Error("沒有找到可用的市民大道路段");
+    }
+
+        const expectedIds = roadOrder;
+    const presentIds = new Set(eastboundRoads.map(road => road.id));
+    const missingIds = expectedIds.filter(id => !presentIds.has(id));
+
+    if (missingIds.length > 0 || eastboundRoads.length !== expectedIds.length) {
+      statusBox.textContent = "無法判斷";
+      detailBox.textContent =
+        "市民大道東行路段資料不完整，請稍後重試。";
+    } else {
+      const speeds = eastboundRoads.map(road => road.speed);
+      const invalidSpeed = speeds.some(speed =>
+        !Number.isFinite(speed) || speed < 0
+      );
+
+      if (invalidSpeed) {
+        statusBox.textContent = "無法判斷";
+        detailBox.textContent = "車速資料異常，請稍後重試。";
+      } else {
+        const minSpeed = Math.min(...speeds);
+
+        if (minSpeed < 15) {
+          statusBox.textContent = "塞車";
+        } else if (minSpeed < 30) {
+          statusBox.textContent = "擁堵";
+        } else {
+          statusBox.textContent = "順暢";
+        }
+
+                detailBox.textContent =
+          "資料更新時間：" + exchangeTime +
+          "（約 " + Math.max(0, Math.round(ageMinutes)) +
+          " 分鐘前）";
+      }
+    }
+   
+
+  } catch (error) {
+    statusBox.textContent = "無法判斷";
+    detailBox.textContent =
+      "讀取失敗：" + error.message +
+      "。請確認網路連線，或稍後再試。";
+  } finally {
+    button.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
